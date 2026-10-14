@@ -18,7 +18,7 @@ Hover over the widget for the details:
 
 ## Install
 
-You need **Windows 11** (Windows 10 mostly works too) and **[Python 3.10 or newer](https://www.python.org/downloads/)**. When installing Python, tick *Add python.exe to PATH*.
+You need **Windows 11** and **[Python 3.10 or newer](https://www.python.org/downloads/)**. When installing Python, tick *Add python.exe to PATH*.
 
 1. Download this repository: **Code → Download ZIP**, then extract it somewhere permanent, such as `Documents\Taskbar-Calendar`. Or clone it:
    ```bash
