@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Personal data: settings (contain your secret calendar link) and logs live in %APPDATA% / %LOCALAPPDATA%,
+# but never commit stray copies from older versions either.
+config.json
+*.log
+claude_usage.json
