@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -42,11 +43,27 @@ def load_usage():
         return None
 
 
+def atomic_write(path, text, attempts=40):
+    """Write via a uniquely named temp file and an atomic replace, so readers never see half a file and two
+    writers (the probe and the CLI status line) can't trip over each other. Windows refuses to replace a file
+    while someone has it open, so retry briefly."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.stem + ".", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                os.remove(tmp)
+                raise
+            time.sleep(0.05)
+
+
 def save_usage(windows):
-    USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = USAGE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({**windows, "updated": time.time()}), encoding="utf-8")
-    os.replace(tmp, USAGE_FILE)  # atomic, so readers never see half a file
+    atomic_write(USAGE_FILE, json.dumps({**windows, "updated": time.time()}))
 
 
 def find_claude_exe():

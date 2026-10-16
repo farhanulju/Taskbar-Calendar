@@ -9,10 +9,27 @@ Standalone on purpose (standard library only, no package imports): it runs on ev
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 USAGE_FILE = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "TaskbarCalendar" / "claude_usage.json"
+
+
+def save(text):
+    """Unique temp file + atomic replace (same as claude_usage.atomic_write); Windows refuses to replace a file
+    someone has open, so retry briefly rather than drop the update."""
+    USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=USAGE_FILE.parent, prefix="claude_usage.", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    for attempt in range(40):
+        try:
+            os.replace(tmp, USAGE_FILE)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    os.remove(tmp)
 
 
 def main():
@@ -24,10 +41,7 @@ def main():
     limits = data.get("rate_limits") or {}
     windows = {k: limits[k] for k in ("five_hour", "seven_day") if isinstance(limits.get(k), dict)}
     if windows:
-        USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = USAGE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**windows, "updated": time.time()}), encoding="utf-8")
-        os.replace(tmp, USAGE_FILE)  # atomic, so the widget never reads half a file
+        save(json.dumps({**windows, "updated": time.time()}))
 
     parts = [
         f"{label} {windows[key].get('used_percentage', 0):.0f}%"

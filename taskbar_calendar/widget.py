@@ -68,6 +68,9 @@ class Widget:
         self.current = None
         self.hover = False
         self.peek = None
+        self.peek_rows = None
+        self.peek_timer = None
+        self.leave_timer = None
         self.settings = None
         self.bg = "#1c1c1c"
 
@@ -546,88 +549,130 @@ class Widget:
     # ----------------------------------------------------------------------------- interaction
 
     def on_enter(self, _):
+        # Every label in the widget sends its own Enter/Leave; treat the whole widget as one hover target.
+        self._cancel("leave_timer")
+        if self.hover:
+            return
         self.hover = True
         if self.claude_usage_age() > 15 * 60:
             self.schedule_probe(0)
         self.set_bg(getattr(self, "hover_bg", self.bg))
-        self.root.after(450, lambda: self.hover and self.show_peek())
+        self.peek_timer = self.root.after(450, self.show_peek)
 
     def on_leave(self, _):
-        x, y = self.root.winfo_pointerxy()
-        if self.root.winfo_containing(x, y) in self.widgets():
+        # Moving between the widget's own labels also fires Leave, so confirm the pointer really left.
+        self._cancel("leave_timer")
+        self.leave_timer = self.root.after(80, self._confirm_leave)
+
+    def _confirm_leave(self):
+        self.leave_timer = None
+        if self._pointer_inside():
             return
         self.hover = False
+        self._cancel("peek_timer")
         self.set_bg(getattr(self, "base_bg", self.bg))
         self.hide_peek()
 
-    def _popup_label(self, parent, text, fg="#ffffff", font=None, **pack):
-        label = tk.Label(parent, text=text, bg=POPUP_BG, fg=fg, font=font or self.font, anchor="w")
-        label.pack(**pack)
-        return label
+    def _pointer_inside(self):
+        if not self.geometry:
+            return False
+        x, y = self.root.winfo_pointerxy()
+        w, h, left, top = self.geometry
+        return left <= x < left + w and top <= y < top + h
 
-    def show_peek(self):
-        now = dt.datetime.now().astimezone()
+    def _cancel(self, name):
+        timer = getattr(self, name, None)
+        if timer:
+            self.root.after_cancel(timer)
+        setattr(self, name, None)
+
+    def _peek_rows(self, now):
+        """What the popup shows, as plain data, so it's only rebuilt when something actually changed."""
+        rows = []
         upcoming = [m for m in self.meetings if m.end > now][:6] if self.cal_width else []
-        claude_rows = list(self.claude_windows(now).values()) if self.claude_width else []
-        if not upcoming and not claude_rows:
-            self.hide_peek()
-            return
-        if self.peek is None:
-            self.peek = tk.Toplevel(self.root)
-            self.peek.overrideredirect(True)
-            self.peek.attributes("-topmost", True)
-        for child in self.peek.winfo_children():
-            child.destroy()
-        box = tk.Frame(self.peek, bg=POPUP_BG, padx=12, pady=10, highlightthickness=1, highlightbackground=POPUP_BORDER)
-        box.pack(fill="both", expand=True)
-
         last_day = None
         for m in upcoming:
             day = m.start.date()
             if day != last_day:
                 days = (day - now.date()).days
                 label = "Today" if days == 0 else "Tomorrow" if days == 1 else m.start.strftime("%A, %b %d")
-                self._popup_label(box, label, GREY, self.font_small_bold, fill="x", pady=(4 if last_day else 0, 2))
+                rows.append(("heading", label, 4 if last_day else 0))
                 last_day = day
-            row = tk.Frame(box, bg=POPUP_BG)
-            row.pack(fill="x")
-            tk.Label(row, text=f"{fmt_time(m.start)}–{fmt_time(m.end)}", width=17, anchor="w", bg=POPUP_BG,
-                     fg=GREEN if m.start <= now else DIM, font=self.font).pack(side="left")
-            tk.Label(row, text=self.ellipsize(m.title, int(260 * self.scale)), anchor="w", bg=POPUP_BG,
-                     fg="#ffffff", font=self.font).pack(side="left")
+            rows.append(("row", f"{fmt_time(m.start)}–{fmt_time(m.end)}", GREEN if m.start <= now else DIM,
+                         self.ellipsize(m.title, int(260 * self.scale)), "#ffffff"))
 
+        claude_rows = list(self.claude_windows(now).values()) if self.claude_width else []
         if claude_rows:
-            self._popup_label(box, "Claude usage", GREY, self.font_small_bold, fill="x", pady=(8 if upcoming else 0, 2))
+            rows.append(("heading", "Claude usage", 8 if upcoming else 0))
             for long, pct, resets, elapsed, runs_out in claude_rows:
-                row = tk.Frame(box, bg=POPUP_BG)
-                row.pack(fill="x")
-                tk.Label(row, text=long, width=17, anchor="w", bg=POPUP_BG, fg=DIM, font=self.font).pack(side="left")
                 detail = f"{pct:.0f}% used"
                 if resets:
                     detail += f" · resets in {cu.fmt_countdown(resets - now.timestamp())} ({cu.fmt_reset(resets, now)})"
                 else:
                     detail += " · starts when you next use Claude"
-                tk.Label(row, text=detail, anchor="w", bg=POPUP_BG, fg=cu.usage_color(pct, runs_out is not None),
-                         font=self.font).pack(side="left")
+                rows.append(("row", long, DIM, detail, cu.usage_color(pct, runs_out is not None)))
                 if runs_out:
-                    self._popup_label(box, f"At this rate you'll hit the limit around {cu.fmt_reset(runs_out, now)}, "
-                                           f"{cu.fmt_countdown(resets - runs_out)} before it resets",
-                                      AMBER, self.font_small, fill="x")
+                    rows.append(("note", f"At this rate you'll hit the limit around {cu.fmt_reset(runs_out, now)}, "
+                                         f"{cu.fmt_countdown(resets - runs_out)} before it resets", AMBER))
                 elif elapsed is not None and elapsed >= 0.05 and pct > 0:
-                    self._popup_label(box, f"At this rate you'll be at ~{min(100, pct / elapsed):.0f}% when it resets",
-                                      GREY, self.font_small, fill="x")
+                    rows.append(("note", f"At this rate you'll be at ~{min(100, pct / elapsed):.0f}% when it resets",
+                                 GREY))
             age = int(self.claude_usage_age() // 60)
             ago = "just now" if age < 1 else f"{age} min ago" if age < 60 else f"{age // 60} h ago"
-            self._popup_label(box, f"Updated {ago}", GREY, self.font_small, fill="x", pady=(2, 0))
+            rows.append(("note", f"Updated {ago}", GREY))
+        return rows
+
+    def show_peek(self):
+        self.peek_timer = None
+        if not self.hover:
+            return
+        rows = self._peek_rows(dt.datetime.now().astimezone())
+        if not rows:
+            self.hide_peek()
+            return
+        if self.peek is not None and rows == self.peek_rows:
+            return  # nothing changed: leave it alone (rebuilding is what made it blink)
+        self.peek_rows = rows
+
+        first = self.peek is None
+        if first:
+            self.peek = tk.Toplevel(self.root, bg=POPUP_BG)
+            self.peek.withdraw()  # build and place it before it's ever visible
+            self.peek.overrideredirect(True)
+            self.peek.attributes("-topmost", True)
+
+        box = tk.Frame(self.peek, bg=POPUP_BG, padx=12, pady=10, highlightthickness=1, highlightbackground=POPUP_BORDER)
+        for row in rows:
+            if row[0] == "heading":
+                tk.Label(box, text=row[1], bg=POPUP_BG, fg=GREY, font=self.font_small_bold,
+                         anchor="w").pack(fill="x", pady=(row[2], 2))
+            elif row[0] == "row":
+                line = tk.Frame(box, bg=POPUP_BG)
+                line.pack(fill="x")
+                tk.Label(line, text=row[1], width=17, anchor="w", bg=POPUP_BG, fg=row[2],
+                         font=self.font).pack(side="left")
+                tk.Label(line, text=row[3], anchor="w", bg=POPUP_BG, fg=row[4], font=self.font).pack(side="left")
+            else:
+                tk.Label(box, text=row[1], bg=POPUP_BG, fg=row[2], font=self.font_small, anchor="w").pack(fill="x")
+        # Swap the new content in only once it's complete, so an open popup never shows a half-built state.
+        old = [c for c in self.peek.winfo_children() if c is not box]
+        box.pack(fill="both", expand=True)
+        for child in old:
+            child.destroy()
 
         self.peek.update_idletasks()
         pw, ph = self.peek.winfo_reqwidth(), self.peek.winfo_reqheight()
         if self.geometry:
             w, h, x, y = self.geometry
-            px = min(x + w - pw, self.root.winfo_screenwidth() - pw - 8)
-            self.peek.geometry(f"+{max(8, px)}+{y - ph - int(14 * self.scale)}")
+            px = max(8, min(x + w - pw, self.root.winfo_screenwidth() - pw - 8))
+            self.peek.geometry(f"{pw}x{ph}+{px}+{y - ph - int(14 * self.scale)}")
+        if first:
+            self.peek.update_idletasks()
+            winapi.style_as_taskbar_item(winapi.user32.GetParent(self.peek.winfo_id()) or self.peek.winfo_id())
+            self.peek.deiconify()
 
     def hide_peek(self):
+        self.peek_rows = None
         if self.peek is not None:
             self.peek.destroy()
             self.peek = None

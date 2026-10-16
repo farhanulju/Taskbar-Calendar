@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -60,6 +61,18 @@ class ProbeOutputTest(unittest.TestCase):
 
     def test_missing_event(self):
         self.assertIsNone(cu.parse_probe_output(json.dumps({"type": "result"})))
+
+
+class AtomicWriteTest(unittest.TestCase):
+    def test_waits_for_a_reader_to_let_go(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "claude_usage.json"
+            target.write_text("old")
+            reader = open(target)  # Windows: an open handle blocks replacing the file
+            threading.Timer(0.3, reader.close).start()
+            cu.atomic_write(target, "new")
+            self.assertEqual(target.read_text(), "new")
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["claude_usage.json"])  # no temp files left
 
 
 class StatusLineScriptTest(unittest.TestCase):
