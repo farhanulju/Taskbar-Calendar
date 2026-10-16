@@ -1,11 +1,18 @@
-# Python
+# .NET build output
+bin/
+obj/
+dist/
+TestResults/
+.vs/
+*.user
+
+# Python (tools/make_icon.py only)
 __pycache__/
 *.py[cod]
 .venv/
-venv/
 
 # Personal data: settings (contain your secret calendar link) and logs live in %APPDATA% / %LOCALAPPDATA%,
-# but never commit stray copies from older versions either.
+# but never commit stray copies.
 config.json
 *.log
 claude_usage.json

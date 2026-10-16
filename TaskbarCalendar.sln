@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{4D7F987C-267A-4EF1-A477-EBE98C5C22D6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaskbarCalendar", "src\TaskbarCalendar\TaskbarCalendar.csproj", "{905C2605-EA3F-40F9-8E87-E510BABA8535}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{B7FDE803-09B3-4E92-8010-7CE690D2CFF0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaskbarCalendar.Tests", "tests\TaskbarCalendar.Tests\TaskbarCalendar.Tests.csproj", "{5E108CFF-E927-4679-8310-3824A78607CC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{905C2605-EA3F-40F9-8E87-E510BABA8535}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{905C2605-EA3F-40F9-8E87-E510BABA8535}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{905C2605-EA3F-40F9-8E87-E510BABA8535}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{905C2605-EA3F-40F9-8E87-E510BABA8535}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5E108CFF-E927-4679-8310-3824A78607CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5E108CFF-E927-4679-8310-3824A78607CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5E108CFF-E927-4679-8310-3824A78607CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5E108CFF-E927-4679-8310-3824A78607CC}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{905C2605-EA3F-40F9-8E87-E510BABA8535} = {4D7F987C-267A-4EF1-A477-EBE98C5C22D6}
+		{5E108CFF-E927-4679-8310-3824A78607CC} = {B7FDE803-09B3-4E92-8010-7CE690D2CFF0}
+	EndGlobalSection
+EndGlobal
