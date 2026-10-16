@@ -151,18 +151,24 @@ class SettingsDialog:
         exe = claude_usage.find_claude_exe()
         status = ttk.Frame(tab)
         status.pack(anchor="w", pady=(4, 6))
-        if exe:
-            ttk.Label(status, text="✓ Claude Code CLI found", style="Good.TLabel").pack(side="left")
+        signed_in, plan = claude_usage.cli_sign_in(exe) if exe and not self.demo else (bool(exe), "max")
+        if signed_in:
+            plan_text = f" ({plan.capitalize()} plan)" if plan else ""
+            ttk.Label(status, text=f"✓ Claude Code CLI is signed in{plan_text}", style="Good.TLabel").pack(side="left")
+        elif exe:
+            ttk.Label(status, text="✗ The Claude Code CLI isn't signed in. Open a terminal and run  claude  once.",
+                      style="Bad.TLabel").pack(side="left")
         else:
             ttk.Label(status, text="✗ Claude Code CLI not found", style="Bad.TLabel").pack(side="left")
             self._link(status, "How to install it", CLAUDE_INSTALL_URL).pack(side="left", padx=8)
 
         self.probe_var = tk.BooleanVar(self.win, self.cfg.get("claude_probe", True))
-        ttk.Checkbutton(tab, text="Refresh automatically while I use Claude (recommended)",
+        ttk.Checkbutton(tab, text="Refresh automatically (free, recommended)",
                         variable=self.probe_var).pack(anchor="w")
-        self._hint(tab, "After you use Claude Code (desktop app or CLI), the widget sends one tiny request through "
-                        "the Claude CLI (about 1,000 tokens on Haiku) to read your usage. At most once every "
-                        "5 minutes, and never while you're idle.", pady=(2, 8))
+        self._hint(tab, "Reads the same numbers as Claude Code's /usage from Anthropic's usage service, using the "
+                        "Claude Code CLI's sign-in. No tokens are used and nothing counts against your limits. "
+                        "Checks shortly after you use Claude, when you hover over the widget, and every "
+                        "10 minutes.", pady=(2, 8))
 
         state = claude_usage.statusline_state()
         self.statusline_initial = state == "ours"

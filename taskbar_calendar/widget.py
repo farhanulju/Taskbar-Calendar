@@ -24,6 +24,13 @@ from .netmeter import NetMeter, fmt_speed
 log = logging.getLogger(__name__)
 
 POPUP_BG, POPUP_BORDER = "#2b2b2b", "#3d3d3d"
+
+# Claude usage checks (seconds). The usage service is free, but stay polite with it.
+USAGE_MIN_INTERVAL = 60  # never more often than this
+USAGE_AFTER_ACTIVITY = 20  # after Claude Code writes to a session, let the reply finish first
+USAGE_ON_HOVER = 120  # hovering refreshes numbers older than this
+USAGE_PERIODIC = 600  # otherwise refresh every 10 minutes while the widget is visible
+PROBE_FALLBACK_INTERVAL = 1800  # the paid fallback probe runs at most every 30 minutes
 GREY, DIM, GREEN, AMBER = "#9a9a9a", "#c5c5c5", "#6ccb5f", "#ffb900"
 
 
@@ -104,10 +111,12 @@ class Widget:
         self.light_taskbar = False
         self.netmeter = NetMeter() if self.net_width and not demo else None
         self.claude_usage = None if demo else cu.load_usage()
-        probe_wanted = self.claude_width and self.cfg.get("claude_probe", True) and not demo
-        self.claude_exe = cu.find_claude_exe() if probe_wanted else None
-        self.probe_timer = None
-        self.probe_running = False
+        self.auto_usage = bool(self.claude_width and self.cfg.get("claude_probe", True) and not demo)
+        self.claude_exe = cu.find_claude_exe() if self.auto_usage else None
+        self.usage_timer = None
+        self.usage_running = False
+        self.last_usage_check = 0.0
+        self.usage_paused_until = 0.0  # set when the usage service asks us to slow down
         self.last_probe = 0.0
 
         self.events = queue.SimpleQueue()
@@ -119,10 +128,9 @@ class Widget:
         self.root.after(0, lambda: threading.Thread(target=self.pump_events, daemon=True).start())
         if self.claude_width and not demo:
             self._watch(cu.USAGE_FILE.parent, "claude-usage")
-        if self.claude_exe:
+        if self.auto_usage:
             self._watch(cu.PROJECTS_DIR, "claude-activity", subtree=True)
-            if self.claude_usage_age() > 30 * 60:
-                self.schedule_probe(5)
+            self.schedule_usage_check(2)
         if first_run:
             self.root.after(800, lambda: self.open_settings(first_run=True))
 
@@ -383,7 +391,7 @@ class Widget:
                 self.minute_tick()
             elif event == "claude-activity":
                 # A Claude Code session wrote its transcript, so usage moved; check once things settle.
-                self.schedule_probe(60)
+                self.schedule_usage_check(USAGE_AFTER_ACTIVITY)
             elif event == "claude-usage":
                 usage = cu.load_usage()
                 if usage:
@@ -394,8 +402,7 @@ class Widget:
             elif event == "resume":
                 self.refresh_now()
                 self.minute_tick()
-                if self.claude_usage_age() > 30 * 60:
-                    self.schedule_probe(15)
+                self.schedule_usage_check(10)
             elif event == "open-settings":
                 self.open_settings()
         except Exception:
@@ -413,43 +420,65 @@ class Widget:
         self.find_weather_widget()
         if self.netmeter:
             self.netmeter.find_adapters()
+        # Chats on claude.ai or in the desktop app's Chat tab leave no local trace, so also check periodically.
+        if self.visible and self.claude_usage_age() > USAGE_PERIODIC:
+            self.schedule_usage_check(0)
         delay = 60 - (time.time() % 60) + 0.2
         self.minute_timer = self.root.after(int(delay * 1000), self.minute_tick)
 
-    # ----------------------------------------------------------------------------- Claude usage probe
+    # ----------------------------------------------------------------------------- Claude usage
 
     def claude_usage_age(self):
         return time.time() - (self.claude_usage or {}).get("updated", 0)
 
-    def schedule_probe(self, delay):
-        """One probe after `delay` s, never sooner than PROBE_MIN_INTERVAL after the last; extra triggers merge."""
-        if not self.claude_exe or self.probe_timer or self.probe_running:
+    def schedule_usage_check(self, delay):
+        """One check after `delay` s, at most once per USAGE_MIN_INTERVAL and never while the usage service has
+        asked us to back off; extra triggers in the meantime merge into the pending one."""
+        if not self.auto_usage or self.usage_timer or self.usage_running:
             return
-        delay = max(delay, self.last_probe + cu.PROBE_MIN_INTERVAL - time.time())
-        self.probe_timer = self.root.after(int(delay * 1000), self.run_probe)
+        delay = max(delay, self.last_usage_check + USAGE_MIN_INTERVAL - time.time(),
+                    self.usage_paused_until - time.time())
+        self.usage_timer = self.root.after(int(delay * 1000), self.check_usage)
 
-    def run_probe(self):
-        self.probe_timer = None
-        self.probe_running = True
+    def check_usage(self):
+        self.usage_timer = None
+        self.usage_running = True
+        exe = self.claude_exe
+        probe_allowed = exe and time.time() - self.last_probe > PROBE_FALLBACK_INTERVAL
 
         def work():
+            pause = 0
+            probed = False
             try:
-                windows = cu.probe_usage(self.claude_exe)
-                if windows:
-                    cu.save_usage(windows)  # the file watcher then updates the display
-            except Exception:
-                log.exception("Claude usage probe failed")
+                cu.save_usage(cu.fetch_usage(exe))  # the file watcher then updates the display
+            except cu.RateLimited as exc:
+                pause = exc.retry_after
+                log.info("Usage service asked to slow down; next check in %s s", pause)
+            except cu.NotSignedIn as exc:
+                # Last resort, at most every half hour: the paid probe works whenever the CLI can run at all.
+                log.info("%s", exc)
+                if probe_allowed:
+                    probed = True
+                    windows = cu.probe_usage(exe)
+                    if windows:
+                        cu.save_usage(windows)
+            except Exception as exc:  # offline, service hiccup: keep the last numbers and try again later
+                log.warning("Usage check failed: %s", exc)
             finally:
                 try:
-                    self.root.after(0, self.probe_done)
+                    self.root.after(0, self.usage_check_done, pause, probed)
                 except RuntimeError:
                     pass
 
         threading.Thread(target=work, daemon=True).start()
 
-    def probe_done(self):
-        self.probe_running = False
-        self.last_probe = time.time()
+    def usage_check_done(self, pause, probed):
+        self.usage_running = False
+        self.last_usage_check = time.time()
+        if pause:
+            self.usage_paused_until = time.time() + pause
+        if probed:
+            self.last_probe = time.time()
 
     # ----------------------------------------------------------------------------- network speed
 
@@ -534,7 +563,16 @@ class Widget:
                 x = limit - int(self.cfg["right_gap"] * self.scale) - width
             y = tb.top + ((tb.bottom - tb.top) - h) // 2
             geo = (width, h, x, y)
-            if geo != self.geometry:
+            # Compare with where the window really is, not where we last put it: other programs (Win+D, screen
+            # capture tools, display changes) can minimize, move or resize it behind our back.
+            actual = winapi.rect_of(self.hwnd)
+            displaced = (actual.right - actual.left, actual.bottom - actual.top, actual.left, actual.top) != geo
+            if self.visible and winapi.user32.IsIconic(self.hwnd):
+                self.root.deiconify()
+                displaced = True
+            if geo != self.geometry or displaced:
+                if displaced and self.geometry == geo:
+                    log.info("Widget window was moved or resized by something else; putting it back")
                 self.geometry = geo
                 self.root.geometry("%dx%d+%d+%d" % geo)
             if not self.visible:
@@ -554,8 +592,8 @@ class Widget:
         if self.hover:
             return
         self.hover = True
-        if self.claude_usage_age() > 15 * 60:
-            self.schedule_probe(0)
+        if self.claude_usage_age() > USAGE_ON_HOVER:
+            self.schedule_usage_check(0)
         self.set_bg(getattr(self, "hover_bg", self.bg))
         self.peek_timer = self.root.after(450, self.show_peek)
 

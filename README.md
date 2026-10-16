@@ -49,16 +49,19 @@ For several calendars, paste one link per line. All-day events, cancelled events
 
 ### Claude usage
 
-Requires a Claude **Pro or Max** plan and the [Claude Code CLI](https://code.claude.com/docs/en/setup), signed in with the same account.
+Requires a Claude **Pro or Max** plan and the [Claude Code CLI](https://code.claude.com/docs/en/setup), signed in with the same account. Run `claude` once in a terminal to sign in. The desktop app has its own sign-in, which the widget can't use.
 
-The numbers can come from two places, and you can use either or both:
+**Automatic refresh is free.** The widget reads the same numbers as Claude Code's `/usage`, from Anthropic's usage service (`api.anthropic.com/api/oauth/usage`), using the Claude Code CLI's sign-in. This sends no message to a model, so no tokens are used and nothing counts against your limits. Most Claude usage trackers work this way.
 
-| Source | When it updates | Cost |
-|---|---|---|
-| **Automatic refresh** (recommended, and the only option for the Claude desktop app) | About a minute after you use Claude Code in the desktop app or the CLI. At most every 5 minutes, and never while you're idle. | One minimal Haiku request through the CLI: no tools, no MCP servers, nothing saved. About 900 tokens. |
-| **CLI status line** | After every Claude Code CLI reply | Free. Claude Code passes the numbers to its [status line](https://code.claude.com/docs/en/statusline). |
+| When it refreshes | |
+|---|---|
+| Shortly after you use Claude Code, in the desktop app or the CLI | 20 s after the activity, at most once a minute |
+| When you hover over the widget | If the numbers are more than 2 minutes old |
+| Every 10 minutes while the widget is visible | Catches claude.ai and desktop Chat usage, which leave no local trace |
 
-The widget never reads your Claude login. Usage from claude.ai chats shows up at the next refresh. Hovering the widget also refreshes numbers older than 15 minutes.
+If the CLI's sign-in has expired (it lasts 8 hours), the widget has the CLI renew it with a request for a model that doesn't exist. The CLI renews the sign-in first, then the request is rejected, so this also uses no tokens. Only if the usage service still can't be reached, for example because you've signed out of the CLI, does the widget fall back to one minimal Haiku request through the CLI (about 900 tokens), at most every 30 minutes. Every check and fallback is logged.
+
+The usage service is undocumented, so Anthropic could change it. Optionally, Settings can also add a Claude Code [status line](https://code.claude.com/docs/en/statusline) that saves your usage after every CLI reply, an official and free second source.
 
 ## Using it
 
@@ -81,7 +84,7 @@ The widget hides itself when a full-screen app or video is in front, follows tas
 
 - Your calendar link is stored only on your PC, in `%APPDATA%\TaskbarCalendar\config.json`. Anyone with that link can read your calendar, so don't share that file.
 - The calendar is fetched directly from Google, and nothing is sent anywhere else.
-- Claude usage is read through the official Claude Code CLI. Taskbar Calendar never touches your Claude credentials.
+- For Claude usage, the widget reads the Claude Code CLI's access token from `~/.claude/.credentials.json` (read-only) and sends it only to `api.anthropic.com`. It never stores, logs, changes or refreshes the token itself. Renewal is left to the CLI.
 - Logs are kept in `%LOCALAPPDATA%\TaskbarCalendar\`, limited to about 2 MB.
 
 ## Troubleshooting
@@ -90,7 +93,7 @@ The widget hides itself when a full-screen app or video is in front, follows tas
 |---|---|
 | "Set up your calendar" | Right-click → Settings and paste your secret iCal address |
 | "Calendar unavailable" / ⚠ | Check your internet connection, and click **Test connection** in Settings. The link may have been reset in Google Calendar. |
-| Claude shows "–" | Install the Claude Code CLI and sign in, then use Claude once. Requires a Pro or Max plan. |
+| Claude shows "–" | Install the Claude Code CLI and run `claude` once to sign in. Requires a Pro or Max plan. Settings → Claude usage shows whether the CLI is signed in. |
 | The widget overlaps something | Settings → Display → increase *Space to the right of the widget* |
 | It doesn't start with Windows | Settings → General → *Start Taskbar Calendar when I sign in* |
 | Anything else | Settings → General → **Open log folder** and check `taskbar_calendar.log` |

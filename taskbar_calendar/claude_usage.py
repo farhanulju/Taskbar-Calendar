@@ -1,9 +1,11 @@
 """Claude plan usage (5-hour and weekly windows).
 
-Two sources write USAGE_FILE, and the widget redraws whenever it changes:
-  * statusline.py, which Claude Code's CLI runs after each reply (free, CLI only), and
-  * probe_usage(), a minimal headless `claude -p` request whose output stream carries a rate_limit_event with
-    both windows. The desktop app doesn't run status lines, so this is what keeps it current there.
+Three sources write USAGE_FILE, and the widget redraws whenever it changes:
+  * fetch_usage(): the usage service behind Claude Code's /usage, called with the Claude Code CLI's sign-in.
+    Free: no model request, nothing counts against your limits. This is the main source.
+  * statusline.py, which the CLI runs after each reply (free, CLI only).
+  * probe_usage(): a minimal headless `claude -p` request (~900 tokens) whose output carries the limits. Only
+    used as a last resort when the usage service can't be reached with the CLI's sign-in.
 """
 
 import datetime as dt
@@ -17,6 +19,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import requests
+
+from . import __version__
+
 from .calendar_feed import fmt_time
 from .config import DATA_DIR
 
@@ -26,8 +32,16 @@ USAGE_FILE = DATA_DIR / "claude_usage.json"  # statusline.py computes the same p
 PROJECTS_DIR = Path.home() / ".claude" / "projects"  # Claude Code (desktop and CLI) writes transcripts here
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 STATUSLINE_SCRIPT = Path(__file__).resolve().parent / "statusline.py"
-PROBE_MIN_INTERVAL = 300  # seconds between probes
+CREDENTIALS = Path.home() / ".claude" / ".credentials.json"  # the Claude Code CLI's sign-in (read-only here)
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 WINDOW_SECONDS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+
+# Renews the CLI's sign-in without using any tokens: the CLI refreshes an expired token before sending a request,
+# and the request itself is then rejected because the model doesn't exist.
+RENEW_ARGS = [
+    "-p", "ok", "--model", "no-such-model", "--max-turns", "1", "--output-format", "json",
+    "--no-session-persistence", "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+]
 
 PROBE_ARGS = [
     "-p", "ok", "--model", "haiku", "--max-turns", "1", "--output-format", "stream-json", "--verbose",
@@ -74,6 +88,102 @@ def find_claude_exe():
     return str(native) if native.exists() else None
 
 
+class NotSignedIn(Exception):
+    """The Claude Code CLI isn't signed in with a Claude account, or its sign-in couldn't be renewed."""
+
+
+class RateLimited(Exception):
+    def __init__(self, retry_after):
+        super().__init__(f"rate limited, retry after {retry_after}s")
+        self.retry_after = retry_after
+
+
+def _read_sign_in():
+    """(access token, expiry in epoch seconds) from the CLI's credentials. Read-only: the token is never
+    refreshed, stored, logged or sent anywhere except api.anthropic.com."""
+    try:
+        oauth = json.loads(CREDENTIALS.read_text(encoding="utf-8")).get("claudeAiOauth") or {}
+    except (OSError, ValueError):
+        return None, None
+    expires = oauth.get("expiresAt")
+    return oauth.get("accessToken"), (expires / 1000 if expires else None)
+
+
+def cli_sign_in(exe):
+    """(signed in, plan) from `claude auth status`: a local check, no request to the model."""
+    try:
+        out = subprocess.run([exe, "auth", "status", "--json"], capture_output=True, timeout=15,
+                             stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+        status = json.loads(out.stdout.decode("utf-8", "replace") or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False, None
+    signed_in = bool(status.get("loggedIn")) and status.get("authMethod") == "claude.ai"
+    return signed_in, status.get("subscriptionType")
+
+
+def renew_sign_in(exe):
+    """Have the CLI renew its own sign-in (zero tokens; see RENEW_ARGS). Blocking, ~5 s."""
+    workdir = DATA_DIR / "probe"
+    workdir.mkdir(parents=True, exist_ok=True)
+    subprocess.run([exe, *RENEW_ARGS], cwd=workdir, stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+    token, expires = _read_sign_in()
+    renewed = bool(token and expires and expires > time.time())
+    log.info("Renewed the Claude Code sign-in (no tokens used)" if renewed else "Couldn't renew the Claude Code sign-in")
+    return renewed
+
+
+def _epoch(value):
+    if value is None or isinstance(value, (int, float)):
+        return value
+    return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+
+
+def parse_usage_response(data):
+    """{window: {used_percentage, resets_at}} from the usage service's response (utilization is 0-100)."""
+    windows = {}
+    for key in WINDOW_SECONDS:
+        w = data.get(key)
+        if isinstance(w, dict) and w.get("utilization") is not None:
+            windows[key] = {"used_percentage": float(w["utilization"]), "resets_at": _epoch(w.get("resets_at"))}
+    return windows
+
+
+def fetch_usage(exe=None):
+    """Plan usage from the usage service, renewing the CLI's sign-in first if it has expired. Raises NotSignedIn
+    or RateLimited; network errors propagate. Blocking: run it off the UI thread."""
+    token, expires = _read_sign_in()
+    if not token:
+        raise NotSignedIn("The Claude Code CLI isn't signed in.")
+    renewed = False
+    if expires and expires < time.time() + 60 and exe:
+        renewed = renew_sign_in(exe)
+        token, _ = _read_sign_in()
+    for attempt in range(2):
+        resp = requests.get(USAGE_URL, timeout=15, headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": f"taskbar-calendar/{__version__}",
+        })
+        if resp.status_code == 401 and attempt == 0 and exe and not renewed:
+            renewed = renew_sign_in(exe)
+            token, _ = _read_sign_in()
+            continue
+        break
+    if resp.status_code in (401, 403):
+        raise NotSignedIn(f"The usage service rejected the Claude Code sign-in (HTTP {resp.status_code}).")
+    if resp.status_code == 429:
+        try:
+            retry_after = max(60, int(resp.headers.get("Retry-After", "")))
+        except ValueError:
+            retry_after = 300
+        raise RateLimited(retry_after)
+    resp.raise_for_status()
+    windows = parse_usage_response(resp.json())
+    log.info("Usage: %s (free usage service)", {k: f"{v['used_percentage']:.0f}%" for k, v in windows.items()})
+    return windows
+
+
 def probe_tokens(text):
     """Total tokens the probe request used, from the stream's final result message (for the log)."""
     for line in reversed(text.splitlines()):
@@ -109,7 +219,7 @@ def parse_probe_output(text):
 
 
 def probe_usage(exe):
-    """One minimal Haiku request (no tools, MCP servers, skills or saved session; ~1k tokens).
+    """Last resort: one minimal Haiku request (no tools, MCP servers, skills or saved session; ~900 tokens).
     Blocking, ~5 s: run it off the UI thread."""
     workdir = DATA_DIR / "probe"
     workdir.mkdir(parents=True, exist_ok=True)

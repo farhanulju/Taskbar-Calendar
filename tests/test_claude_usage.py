@@ -4,8 +4,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from taskbar_calendar import claude_usage as cu
 
@@ -125,3 +127,83 @@ class StatusLineSettingsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeResponse:
+    def __init__(self, status, body=None, headers=None):
+        self.status_code, self._body, self.headers = status, body or {}, headers or {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+
+USAGE_BODY = {
+    "five_hour": {"utilization": 27.0, "resets_at": "2026-10-16T14:19:59.649435+00:00"},
+    "seven_day": {"utilization": 93.0, "resets_at": "2026-10-16T14:59:59+00:00"},
+    "seven_day_opus": None,
+}
+
+
+class FreeUsageServiceTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.creds = Path(tmp.name) / ".credentials.json"
+        patcher = mock.patch.object(cu, "CREDENTIALS", self.creds)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def sign_in(self, token="tok-1", expires_in=3600):
+        self.creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": token,
+                                                            "expiresAt": int((time.time() + expires_in) * 1000)}}))
+
+    def test_parses_percentages_and_reset_times(self):
+        windows = cu.parse_usage_response(USAGE_BODY)
+        self.assertEqual(windows["five_hour"]["used_percentage"], 27.0)
+        self.assertAlmostEqual(windows["seven_day"]["resets_at"], 1792162799.0)
+        self.assertEqual(set(windows), {"five_hour", "seven_day"})
+
+    def test_sends_the_token_only_to_anthropic(self):
+        self.sign_in()
+        with mock.patch.object(cu.requests, "get", return_value=FakeResponse(200, USAGE_BODY)) as get:
+            cu.fetch_usage()
+        (url,), kwargs = get.call_args
+        self.assertTrue(url.startswith("https://api.anthropic.com/"))
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok-1")
+
+    def test_expired_sign_in_is_renewed_before_the_request(self):
+        self.sign_in(expires_in=-60)
+
+        def renew(exe):
+            self.sign_in("tok-2")
+            return True
+
+        with mock.patch.object(cu, "renew_sign_in", side_effect=renew) as renewed, \
+                mock.patch.object(cu.requests, "get", return_value=FakeResponse(200, USAGE_BODY)) as get:
+            cu.fetch_usage("claude.exe")
+        renewed.assert_called_once()
+        self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer tok-2")
+
+    def test_rejected_token_is_renewed_once_then_reported(self):
+        self.sign_in()
+        with mock.patch.object(cu, "renew_sign_in", return_value=False) as renewed, \
+                mock.patch.object(cu.requests, "get", return_value=FakeResponse(401)) as get:
+            with self.assertRaises(cu.NotSignedIn):
+                cu.fetch_usage("claude.exe")
+        renewed.assert_called_once()
+        self.assertEqual(get.call_count, 2)
+
+    def test_rate_limit_reports_when_to_retry(self):
+        self.sign_in()
+        with mock.patch.object(cu.requests, "get", return_value=FakeResponse(429, headers={"Retry-After": "120"})):
+            with self.assertRaises(cu.RateLimited) as ctx:
+                cu.fetch_usage()
+        self.assertEqual(ctx.exception.retry_after, 120)
+
+    def test_not_signed_in(self):
+        with self.assertRaises(cu.NotSignedIn):
+            cu.fetch_usage()
