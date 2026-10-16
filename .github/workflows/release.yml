@@ -1,0 +1,54 @@
+# Push a version tag to publish a release:
+#   git tag v2.1.0 && git push origin v2.1.0
+# Installed copies find it through the GitHub Releases API, verify TaskbarCalendar.exe against
+# TaskbarCalendar.exe.sha256, and update themselves.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: dotnet test TaskbarCalendar.sln -c Release --nologo -p:Version=${{ steps.version.outputs.version }}
+
+      - name: Build
+        run: dotnet build src/TaskbarCalendar -c Release --nologo -p:Version=${{ steps.version.outputs.version }} -o dist
+
+      - name: Checksum
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum TaskbarCalendar.exe > TaskbarCalendar.exe.sha256
+          cat TaskbarCalendar.exe.sha256
+
+      - name: Check the EXE reports the tag's version
+        shell: pwsh
+        run: |
+          $v = (Get-Item dist/TaskbarCalendar.exe).VersionInfo.ProductVersion.Split('+')[0]
+          if ($v -ne '${{ steps.version.outputs.version }}') { throw "EXE says $v, tag says ${{ steps.version.outputs.version }}" }
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/TaskbarCalendar.exe dist/TaskbarCalendar.exe.sha256 \
+            --title "Taskbar Calendar $GITHUB_REF_NAME" --generate-notes --verify-tag
