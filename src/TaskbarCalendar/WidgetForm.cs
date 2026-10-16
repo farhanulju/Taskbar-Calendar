@@ -45,7 +45,7 @@ namespace TaskbarCalendar
         int calWidth, claudeWidth, netWidth;
 
         // State
-        bool hover, shown;
+        bool hover, shown, menuOpen;
         (int Left, int Right)? weatherSpan;
         int weatherBusy;
         PeekForm peek;
@@ -609,7 +609,7 @@ namespace TaskbarCalendar
 
         void ShowPeek()
         {
-            if (!hover) return;
+            if (!hover || menuOpen) return;   // never cover (and so close) the right-click menu
             var rows = PeekForm.BuildRows(this, DateTime.Now);
             if (rows.Count == 0) { HidePeek(); return; }
             if (peek == null) peek = new PeekForm(font, SmallFont, SmallBoldFont);
@@ -628,6 +628,14 @@ namespace TaskbarCalendar
         public bool ShowsClaude => claudeWidth > 0;
         public double UsageAgeSeconds => UsageAge;
         public int EllipsizeWidth => Px(260);
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            // A click means the user is acting, not peeking: drop the popup and any pending one.
+            peekTimer.Stop();
+            HidePeek();
+        }
 
         protected override void OnMouseClick(MouseEventArgs e)
         {
@@ -668,7 +676,16 @@ namespace TaskbarCalendar
             }
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Quit", null, (s, e) => Close());
-            menu.Closed += (s, e) => BeginInvoke(new Action(menu.Dispose));
+            menu.Closed += (s, e) =>
+            {
+                menuOpen = false;
+                leaveTimer.Start();   // the menu captured the mouse; re-check whether we're still hovered
+                BeginInvoke(new Action(menu.Dispose));
+            };
+            menuOpen = true;
+            // The widget never takes focus, but a menu only closes on outside clicks when its app loses focus,
+            // so take it now (the same thing Windows asks of tray icon menus).
+            WinApi.SetForegroundWindow(Handle);
             menu.Show(this, at);
         }
 
